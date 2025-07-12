@@ -1,3 +1,4 @@
+# .github/workflows/pages.yml
 name: Deploy to GitHub Pages
 
 on:
@@ -5,32 +6,49 @@ on:
     branches: [main]
 
 permissions:
-  pages: write
-  id-token: write   # OIDC for deploy
-  contents: read    # checkout only
+  contents: write      # push to gh-pages
+  pages: write         # publish Pages
+  id-token: write      # OIDC for Pages deploy
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    defaults:
+      run:
+        shell: bash
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: 📥 Check out source
+        uses: actions/checkout@v4
+
+      - name: 🟢 Set up Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
+          cache: npm           # <-- built-in cache
 
-      - name: Install & build
+      - name: 🔧 Install & build
         env:
           VITE_API_URL: ${{ secrets.API_URL }}
           VITE_ANALYTICS_ID: ${{ secrets.ANALYTICS_ID }}
           CI: true
         run: |
           npm ci
-          npm run build          # outputs to dist/
+          npm run build        # MUST output to dist/
 
-      - uses: actions/upload-pages-artifact@v3
+      - name: 🔍 Smoke-test build artefacts
+        run: |
+          if [ ! -d dist ] || [ -z "$(ls -A dist)" ]; then
+            echo "🔴 dist/ is missing or empty" >&2
+            exit 1
+          fi
+          echo "✅ dist/ exists with files:"
+          ls -R dist | head -n 20
+
+      - name: 🚀 Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
         with:
-          path: build
-
-      - uses: actions/deploy-pages@v4   # 🚀
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: dist          # match your Vite outDir
+          publish_branch: gh-pages   # default but explicit
+          force_orphan: true         # ignores .gitignore, starts clean tree
