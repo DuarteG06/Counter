@@ -1,117 +1,285 @@
-"use client"
+"use client";
 
-import type React from "react"
+import type React from "react";
 
-import { useState, useEffect, useRef } from "react"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { Badge } from "@/components/ui/badge"
-import { Progress } from "@/components/ui/progress"
-import { Plus, Minus, Trash2, Edit2, Trophy, Medal, Crown, Upload, User } from "lucide-react"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
-import { Label } from "@/components/ui/label"
+import { useState, useEffect, useRef } from "react";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
+import {
+  Plus,
+  Minus,
+  Trash2,
+  Edit2,
+  Trophy,
+  Medal,
+  Crown,
+  Upload,
+  User,
+  Lock,
+} from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 
+/** -----------------------------------------------------------
+ *                     ✨  DATA TYPES
+ * ----------------------------------------------------------*/
 interface Counter {
-  id: string
-  name: string
-  phrase: string
-  count: number
-  color: string
-  profilePicture?: string
+  id: string;
+  name: string;
+  phrase: string;
+  count: number;
+  color: string;
+  profilePicture?: string;
 }
-
 interface GroupedCounter {
-  name: string
-  totalCount: number
-  color: string
-  phrases: string[]
-  profilePicture?: string
+  name: string;
+  totalCount: number;
+  color: string;
+  phrases: string[];
+  profilePicture?: string;
+}
+interface RankedCounter extends GroupedCounter {
+  rank: number;
 }
 
-interface RankedCounter extends GroupedCounter {
-  rank: number
+/** -----------------------------------------------------------
+ *                     🔌  SUPABASE CLIENT
+ * ----------------------------------------------------------*/
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
+if (!supabaseUrl || !supabaseAnonKey) {
+  // eslint‑disable‑next‑line no‑console
+  console.warn("⛔️ Supabase env vars missing – realtime sync disabled.");
 }
+const supabase: SupabaseClient | null =
+  supabaseUrl && supabaseAnonKey
+    ? createClient(supabaseUrl, supabaseAnonKey)
+    : null;
 
 export default function UniversalCounterApp() {
-  const [counters, setCounters] = useState<Counter[]>([
-    {
-      id: "1",
-      name: "Peter",
-      phrase: "Tenho fome / Não vais comer isso?",
-      count: 0,
-      color: "#4CAF50",
-    },
-    {
-      id: "2",
-      name: "Torta",
-      phrase: "Esqueci-me",
-      count: 0,
-      color: "#dcbc19",
-    },
-  ])
+  /* ---------------------------------------------------------
+   * 🔐  SIMPLE PASSWORD AUTH – persistent per browser.
+   * --------------------------------------------------------*/
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(
+    () =>
+      typeof window !== "undefined" &&
+      localStorage.getItem("isAuthenticated") === "true"
+  );
+  const [passwordInput, setPasswordInput] = useState("");
+  const [authDialogOpen, setAuthDialogOpen] = useState(!isAuthenticated);
+  const authenticate = () => {
+    if (passwordInput.trim().toLowerCase() === "skibidi") {
+      setIsAuthenticated(true);
+      localStorage.setItem("isAuthenticated", "true");
+      setAuthDialogOpen(false);
+    } else {
+      alert("Wrong password – try again.");
+    }
+  };
+
+  /* ---------------------------------------------------------
+   * 📡  REALTIME SYNC →  Supabase + BroadcastChannel + localStorage
+   * --------------------------------------------------------*/
+  const bcRef = useRef<BroadcastChannel | null>(null);
+  const supaChannelRef = useRef<any>(null);
+  const instanceId = useRef<string>(Math.random().toString(36).slice(2));
+
+  // ---------- local state ----------
+  const [counters, setCounters] = useState<Counter[]>([]);
+
+  // ---------- INITIAL LOAD ----------
+  useEffect(() => {
+    const loadInitial = async () => {
+      // Prefer server snapshot → fallback to localStorage → fallback to seed
+      if (supabase) {
+        const { data } = await supabase
+          .from("counter_state")
+          .select("data")
+          .eq("id", 1)
+          .single();
+        if (data?.data) {
+          setCounters(data.data as Counter[]);
+          return;
+        }
+      }
+      const local = localStorage.getItem("universalCounters");
+      if (local) {
+        setCounters(JSON.parse(local));
+        return;
+      }
+      // seed
+      setCounters([
+        {
+          id: "1",
+          name: "Peter",
+          phrase: "Tenho fome / Não vais comer isso?",
+          count: 0,
+          color: "#4CAF50",
+        },
+        {
+          id: "2",
+          name: "Torta",
+          phrase: "Esqueci-me",
+          count: 0,
+          color: "#dcbc19",
+        },
+      ]);
+    };
+    loadInitial();
+  }, []);
+
+  // ---------- BROADCAST CHANNEL ----------
+  useEffect(() => {
+    bcRef.current = new BroadcastChannel("universal-counter-sync");
+    bcRef.current.onmessage = (e) => {
+      const { sender, counters: incoming } = e.data || {};
+      if (sender !== instanceId.current && Array.isArray(incoming)) {
+        setCounters(incoming);
+      }
+    };
+    return () => bcRef.current?.close();
+  }, []);
+
+  // ---------- SUPABASE REALTIME ----------
+  useEffect(() => {
+    if (!supabase) return;
+    supaChannelRef.current = supabase.channel("universal-counter-sync");
+    supaChannelRef.current
+      .on("broadcast", { event: "SYNC_STATE" }, (payload: any) => {
+        if (
+          payload?.sender !== instanceId.current &&
+          Array.isArray(payload?.counters)
+        ) {
+          setCounters(payload.counters);
+        }
+      })
+      .subscribe();
+    return () => supaChannelRef.current?.unsubscribe();
+  }, []);
+
+  const resetAllCounters = () => {
+    setCounters((prev) => prev.map((counter) => ({ ...counter, count: 0 })));
+  };
+
+  // ---------- PERSIST + PUBLISH ----------
+  const publish = (state: Counter[]) => {
+    // local
+    localStorage.setItem("universalCounters", JSON.stringify(state));
+    // broadcast‑channel
+    bcRef.current?.postMessage({ sender: instanceId.current, counters: state });
+    // supabase realtime broadcast
+    supaChannelRef.current?.send({
+      type: "broadcast",
+      event: "SYNC_STATE",
+      payload: { sender: instanceId.current, counters: state },
+    });
+    // snapshot in DB (upsert row id 1)
+    supabase?.from("counter_state").upsert({ id: 1, data: state });
+  };
+
+  // whenever counters change → publish
+  useEffect(() => {
+    if (counters.length) publish(counters);
+  }, [counters]);
+
+  /* ---------------------------------------------------------
+   * 👍  GUARD helper to block edits unless authenticated
+   * --------------------------------------------------------*/
+  const guard =
+    <T extends any[]>(fn: (...args: T) => void) =>
+    (...args: T) => {
+      if (!isAuthenticated) {
+        setAuthDialogOpen(true);
+        return;
+      }
+      fn(...args);
+    };
+
+  /* ---------------------------------------------------------
+   *  CRUD ACTIONS (wrapped with guard)
+   * --------------------------------------------------------*/
+  const increaseCounter = guard((id: string) => {
+    setCounters((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, count: c.count + 1 } : c))
+    );
+  });
+  const decreaseCounter = guard((id: string) => {
+    setCounters((prev) =>
+      prev.map((c) =>
+        c.id === id ? { ...c, count: Math.max(0, c.count - 1) } : c
+      )
+    );
+  });
+  const deleteCounter = guard((id: string) => {
+    setCounters((prev) => prev.filter((c) => c.id !== id));
+  });
 
   const [newCounter, setNewCounter] = useState({
     name: "",
     phrase: "",
     color: "#4CAF50",
     profilePicture: "",
-  })
+  });
 
-  const [editingCounter, setEditingCounter] = useState<Counter | null>(null)
-  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
-  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
-  const fileInputRef = useRef<HTMLInputElement>(null)
-  const editFileInputRef = useRef<HTMLInputElement>(null)
+  const [editingCounter, setEditingCounter] = useState<Counter | null>(null);
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const editFileInputRef = useRef<HTMLInputElement>(null);
 
   // Load data from localStorage on component mount
   useEffect(() => {
-    const savedCounters = localStorage.getItem("universalCounters")
+    const savedCounters = localStorage.getItem("universalCounters");
     if (savedCounters) {
-      setCounters(JSON.parse(savedCounters))
+      setCounters(JSON.parse(savedCounters));
     }
-  }, [])
+  }, []);
 
   // Save to localStorage whenever counters change
   useEffect(() => {
-    localStorage.setItem("universalCounters", JSON.stringify(counters))
-  }, [counters])
+    localStorage.setItem("universalCounters", JSON.stringify(counters));
+  }, [counters]);
 
-  const handleImageUpload = (event: React.ChangeEvent<HTMLInputElement>, isEdit = false) => {
-    const file = event.target.files?.[0]
+  const handleImageUpload = (
+    event: React.ChangeEvent<HTMLInputElement>,
+    isEdit = false
+  ) => {
+    const file = event.target.files?.[0];
     if (file && file.type.startsWith("image/")) {
-      const reader = new FileReader()
+      const reader = new FileReader();
       reader.onload = (e) => {
-        const base64 = e.target?.result as string
+        const base64 = e.target?.result as string;
         if (isEdit && editingCounter) {
-          setEditingCounter((prev) => (prev ? { ...prev, profilePicture: base64 } : null))
+          setEditingCounter((prev) =>
+            prev ? { ...prev, profilePicture: base64 } : null
+          );
         } else {
-          setNewCounter((prev) => ({ ...prev, profilePicture: base64 }))
+          setNewCounter((prev) => ({ ...prev, profilePicture: base64 }));
         }
-      }
-      reader.readAsDataURL(file)
+      };
+      reader.readAsDataURL(file);
     }
-  }
+  };
 
   const removeProfilePicture = (isEdit = false) => {
     if (isEdit && editingCounter) {
-      setEditingCounter((prev) => (prev ? { ...prev, profilePicture: "" } : null))
+      setEditingCounter((prev) =>
+        prev ? { ...prev, profilePicture: "" } : null
+      );
     } else {
-      setNewCounter((prev) => ({ ...prev, profilePicture: "" }))
+      setNewCounter((prev) => ({ ...prev, profilePicture: "" }));
     }
-  }
-
-  const increaseCounter = (id: string) => {
-    setCounters((prev) =>
-      prev.map((counter) => (counter.id === id ? { ...counter, count: counter.count + 1 } : counter)),
-    )
-  }
-
-  const decreaseCounter = (id: string) => {
-    setCounters((prev) =>
-      prev.map((counter) => (counter.id === id ? { ...counter, count: Math.max(0, counter.count - 1) } : counter)),
-    )
-  }
+  };
 
   const addCounter = () => {
     if (newCounter.name.trim() && newCounter.phrase.trim()) {
@@ -122,53 +290,60 @@ export default function UniversalCounterApp() {
         count: 0,
         color: newCounter.color,
         profilePicture: newCounter.profilePicture || undefined,
-      }
-      setCounters((prev) => [...prev, counter])
-      setNewCounter({ name: "", phrase: "", color: "#4CAF50", profilePicture: "" })
-      setIsAddDialogOpen(false)
+      };
+      setCounters((prev) => [...prev, counter]);
+      setNewCounter({
+        name: "",
+        phrase: "",
+        color: "#4CAF50",
+        profilePicture: "",
+      });
+      setIsAddDialogOpen(false);
       if (fileInputRef.current) {
-        fileInputRef.current.value = ""
+        fileInputRef.current.value = "";
       }
     }
-  }
-
-  const deleteCounter = (id: string) => {
-    setCounters((prev) => prev.filter((counter) => counter.id !== id))
-  }
+  };
 
   const startEdit = (counter: Counter) => {
-    setEditingCounter({ ...counter })
-    setIsEditDialogOpen(true)
-  }
+    setEditingCounter({ ...counter });
+    setIsEditDialogOpen(true);
+  };
 
   const saveEdit = () => {
-    if (editingCounter && editingCounter.name.trim() && editingCounter.phrase.trim()) {
-      setCounters((prev) => prev.map((counter) => (counter.id === editingCounter.id ? editingCounter : counter)))
-      setEditingCounter(null)
-      setIsEditDialogOpen(false)
+    if (
+      editingCounter &&
+      editingCounter.name.trim() &&
+      editingCounter.phrase.trim()
+    ) {
+      setCounters((prev) =>
+        prev.map((counter) =>
+          counter.id === editingCounter.id ? editingCounter : counter
+        )
+      );
+      setEditingCounter(null);
+      setIsEditDialogOpen(false);
       if (editFileInputRef.current) {
-        editFileInputRef.current.value = ""
+        editFileInputRef.current.value = "";
       }
     }
-  }
-
-  const resetAllCounters = () => {
-    setCounters((prev) => prev.map((counter) => ({ ...counter, count: 0 })))
-  }
+  };
 
   // Group counters by name and sum their counts
   const getGroupedCounters = (): GroupedCounter[] => {
     const grouped = counters.reduce((acc, counter) => {
-      const existingGroup = acc.find((group) => group.name.toLowerCase() === counter.name.toLowerCase())
+      const existingGroup = acc.find(
+        (group) => group.name.toLowerCase() === counter.name.toLowerCase()
+      );
 
       if (existingGroup) {
-        existingGroup.totalCount += counter.count
+        existingGroup.totalCount += counter.count;
         if (!existingGroup.phrases.includes(counter.phrase)) {
-          existingGroup.phrases.push(counter.phrase)
+          existingGroup.phrases.push(counter.phrase);
         }
         // Use the profile picture from the first counter with one, or keep existing
         if (!existingGroup.profilePicture && counter.profilePicture) {
-          existingGroup.profilePicture = counter.profilePicture
+          existingGroup.profilePicture = counter.profilePicture;
         }
       } else {
         acc.push({
@@ -177,51 +352,65 @@ export default function UniversalCounterApp() {
           color: counter.color,
           phrases: [counter.phrase],
           profilePicture: counter.profilePicture,
-        })
+        });
       }
 
-      return acc
-    }, [] as GroupedCounter[])
+      return acc;
+    }, [] as GroupedCounter[]);
 
-    return grouped.sort((a, b) => b.totalCount - a.totalCount)
-  }
+    return grouped.sort((a, b) => b.totalCount - a.totalCount);
+  };
 
   // Calculate proper rankings with ties
   const getRankedCounters = (): RankedCounter[] => {
-    const grouped = getGroupedCounters()
-    const ranked: RankedCounter[] = []
+    const grouped = getGroupedCounters();
+    const ranked: RankedCounter[] = [];
 
-    let currentRank = 1
+    let currentRank = 1;
     for (let i = 0; i < grouped.length; i++) {
       if (i > 0 && grouped[i].totalCount < grouped[i - 1].totalCount) {
-        currentRank = i + 1
+        currentRank = i + 1;
       }
       ranked.push({
         ...grouped[i],
         rank: currentRank,
-      })
+      });
     }
 
-    return ranked
-  }
+    return ranked;
+  };
 
-  const groupedCounters = getGroupedCounters()
-  const rankedCounters = getRankedCounters()
-  const maxGroupedCount = Math.max(...groupedCounters.map((g) => g.totalCount), 1)
-  const colorOptions = ["#4CAF50", "#2196F3", "#FF9800", "#E91E63", "#9C27B0", "#00BCD4", "#FF5722", "#795548"]
+  const groupedCounters = getGroupedCounters();
+  const rankedCounters = getRankedCounters();
+  const maxGroupedCount = Math.max(
+    ...groupedCounters.map((g) => g.totalCount),
+    1
+  );
+  const colorOptions = [
+    "#4CAF50",
+    "#2196F3",
+    "#FF9800",
+    "#E91E63",
+    "#9C27B0",
+    "#00BCD4",
+    "#FF5722",
+    "#795548",
+  ];
 
   // Get podium data (top 3 unique ranks)
   const getPodiumData = () => {
-    const topRanks = rankedCounters.filter((c) => c.rank <= 3 && c.totalCount > 0)
+    const topRanks = rankedCounters.filter(
+      (c) => c.rank <= 3 && c.totalCount > 0
+    );
     const podium = {
       first: topRanks.filter((c) => c.rank === 1),
       second: topRanks.filter((c) => c.rank === 2),
       third: topRanks.filter((c) => c.rank === 3),
-    }
-    return podium
-  }
+    };
+    return podium;
+  };
 
-  const podiumData = getPodiumData()
+  const podiumData = getPodiumData();
 
   // Profile picture component
   const ProfilePicture = ({
@@ -231,11 +420,11 @@ export default function UniversalCounterApp() {
     size = "w-12 h-12",
     textSize = "text-sm",
   }: {
-    src?: string
-    name: string
-    color: string
-    size?: string
-    textSize?: string
+    src?: string;
+    name: string;
+    color: string;
+    size?: string;
+    textSize?: string;
   }) => {
     if (src) {
       return (
@@ -244,7 +433,7 @@ export default function UniversalCounterApp() {
           alt={`${name}'s profile`}
           className={`${size} rounded-full object-cover border-2 border-white shadow-lg`}
         />
-      )
+      );
     }
 
     return (
@@ -254,15 +443,45 @@ export default function UniversalCounterApp() {
       >
         {name.slice(0, 2).toUpperCase()}
       </div>
-    )
-  }
+    );
+  };
 
+  /* ---------------------------------------------------------
+   *  🖥  RENDER
+   * --------------------------------------------------------*/
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+      {/* 🔐  Password modal  */}
+      <Dialog open={authDialogOpen} onOpenChange={() => {}}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Lock className="w-4 h-4" /> Enter secret word
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4">
+            <Input
+              autoFocus
+              type="password"
+              value={passwordInput}
+              placeholder="skibidi"
+              onChange={(e) => setPasswordInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && authenticate()}
+            />
+            <Button className="w-full" onClick={authenticate}>
+              Unlock
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
       <div className="max-w-4xl mx-auto">
         <header className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-800 mb-2">Universal Counter & Leaderboard</h1>
-          <p className="text-lg text-gray-600">Track anything, compete with anyone!</p>
+          <h1 className="text-4xl font-bold text-gray-800 mb-2">
+            Universal Counter & Leaderboard
+          </h1>
+          <p className="text-lg text-gray-600">
+            Track anything, compete with anyone!
+          </p>
           <p className="text-sm text-gray-500 mt-2">
             💡 Tip: Counters with the same name are combined in the leaderboard
           </p>
@@ -273,21 +492,29 @@ export default function UniversalCounterApp() {
           <Card className="mb-8 bg-gradient-to-r from-yellow-50 to-amber-50 border-yellow-200">
             <CardContent className="pt-6">
               {(() => {
-                const maxCount = Math.max(...groupedCounters.map((g) => g.totalCount))
-                const winners = groupedCounters.filter((g) => g.totalCount === maxCount && g.totalCount > 0)
+                const maxCount = Math.max(
+                  ...groupedCounters.map((g) => g.totalCount)
+                );
+                const winners = groupedCounters.filter(
+                  (g) => g.totalCount === maxCount && g.totalCount > 0
+                );
 
                 if (maxCount === 0) {
                   return (
                     <div className="text-center">
                       <Trophy className="w-8 h-8 mx-auto mb-2 text-gray-400" />
-                      <p className="text-lg font-semibold text-gray-600">No one is winning yet!</p>
-                      <p className="text-sm text-gray-500">Start counting to see who takes the lead</p>
+                      <p className="text-lg font-semibold text-gray-600">
+                        No one is winning yet!
+                      </p>
+                      <p className="text-sm text-gray-500">
+                        Start counting to see who takes the lead
+                      </p>
                     </div>
-                  )
+                  );
                 }
 
                 if (winners.length === 1) {
-                  const winner = winners[0]
+                  const winner = winners[0];
                   return (
                     <div className="text-center">
                       <div className="flex justify-center mb-3">
@@ -300,11 +527,16 @@ export default function UniversalCounterApp() {
                         />
                       </div>
                       <Trophy className="w-8 h-8 mx-auto mb-2 text-yellow-500" />
-                      <p className="text-2xl font-bold mb-1" style={{ color: winner.color }}>
+                      <p
+                        className="text-2xl font-bold mb-1"
+                        style={{ color: winner.color }}
+                      >
                         🎉 {winner.name} is winning! 🎉
                       </p>
                       <p className="text-lg text-gray-600">
-                        with <span className="font-bold">{winner.totalCount}</span> total counts
+                        with{" "}
+                        <span className="font-bold">{winner.totalCount}</span>{" "}
+                        total counts
                       </p>
                       <div className="text-sm text-gray-500 italic mt-1">
                         {winner.phrases.length === 1 ? (
@@ -321,7 +553,7 @@ export default function UniversalCounterApp() {
                         )}
                       </div>
                     </div>
-                  )
+                  );
                 }
 
                 return (
@@ -338,27 +570,35 @@ export default function UniversalCounterApp() {
                       ))}
                     </div>
                     <Trophy className="w-8 h-8 mx-auto mb-2 text-yellow-500" />
-                    <p className="text-xl font-bold text-gray-700 mb-1">🤝 It's a tie! 🤝</p>
+                    <p className="text-xl font-bold text-gray-700 mb-1">
+                      🤝 It's a tie! 🤝
+                    </p>
                     <p className="text-lg text-gray-600 mb-2">
                       {winners.map((w) => w.name).join(", ")} are tied with{" "}
                       <span className="font-bold">{maxCount}</span> counts each
                     </p>
                     <div className="flex flex-wrap justify-center gap-2">
                       {winners.map((winner) => (
-                        <Badge key={winner.name} style={{ backgroundColor: winner.color }} className="text-white">
+                        <Badge
+                          key={winner.name}
+                          style={{ backgroundColor: winner.color }}
+                          className="text-white"
+                        >
                           {winner.name}
                         </Badge>
                       ))}
                     </div>
                   </div>
-                )
+                );
               })()}
             </CardContent>
           </Card>
         )}
 
         {/* Podium View */}
-        {(podiumData.first.length > 0 || podiumData.second.length > 0 || podiumData.third.length > 0) && (
+        {(podiumData.first.length > 0 ||
+          podiumData.second.length > 0 ||
+          podiumData.third.length > 0) && (
           <Card className="mb-8 bg-gradient-to-r from-purple-50 to-pink-50 border-purple-200">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 justify-center">
@@ -380,15 +620,21 @@ export default function UniversalCounterApp() {
                             color={player.color}
                             size="w-12 h-12"
                           />
-                          <p className="text-xs font-medium mt-1">{player.name}</p>
-                          <p className="text-xs text-gray-600">{player.totalCount}</p>
+                          <p className="text-xs font-medium mt-1">
+                            {player.name}
+                          </p>
+                          <p className="text-xs text-gray-600">
+                            {player.totalCount}
+                          </p>
                         </div>
                       ))}
                     </div>
                     <div className="w-20 h-16 bg-gradient-to-t from-gray-400 to-gray-300 rounded-t-lg flex items-center justify-center">
                       <Medal className="w-6 h-6 text-gray-600" />
                     </div>
-                    <div className="bg-gray-300 text-gray-700 px-3 py-1 rounded-b text-sm font-bold">2nd</div>
+                    <div className="bg-gray-300 text-gray-700 px-3 py-1 rounded-b text-sm font-bold">
+                      2nd
+                    </div>
                   </div>
                 )}
 
@@ -404,15 +650,21 @@ export default function UniversalCounterApp() {
                             color={player.color}
                             size="w-14 h-14"
                           />
-                          <p className="text-sm font-bold mt-1">{player.name}</p>
-                          <p className="text-sm text-gray-600">{player.totalCount}</p>
+                          <p className="text-sm font-bold mt-1">
+                            {player.name}
+                          </p>
+                          <p className="text-sm text-gray-600">
+                            {player.totalCount}
+                          </p>
                         </div>
                       ))}
                     </div>
                     <div className="w-24 h-20 bg-gradient-to-t from-yellow-500 to-yellow-400 rounded-t-lg flex items-center justify-center">
                       <Crown className="w-8 h-8 text-yellow-800" />
                     </div>
-                    <div className="bg-yellow-400 text-yellow-800 px-4 py-1 rounded-b text-sm font-bold">1st</div>
+                    <div className="bg-yellow-400 text-yellow-800 px-4 py-1 rounded-b text-sm font-bold">
+                      1st
+                    </div>
                   </div>
                 )}
 
@@ -429,15 +681,21 @@ export default function UniversalCounterApp() {
                             size="w-10 h-10"
                             textSize="text-xs"
                           />
-                          <p className="text-xs font-medium mt-1">{player.name}</p>
-                          <p className="text-xs text-gray-600">{player.totalCount}</p>
+                          <p className="text-xs font-medium mt-1">
+                            {player.name}
+                          </p>
+                          <p className="text-xs text-gray-600">
+                            {player.totalCount}
+                          </p>
                         </div>
                       ))}
                     </div>
                     <div className="w-16 h-12 bg-gradient-to-t from-amber-600 to-amber-500 rounded-t-lg flex items-center justify-center">
                       <Medal className="w-5 h-5 text-amber-800" />
                     </div>
-                    <div className="bg-amber-500 text-amber-800 px-2 py-1 rounded-b text-xs font-bold">3rd</div>
+                    <div className="bg-amber-500 text-amber-800 px-2 py-1 rounded-b text-xs font-bold">
+                      3rd
+                    </div>
                   </div>
                 )}
               </div>
@@ -465,10 +723,16 @@ export default function UniversalCounterApp() {
                     id="name"
                     placeholder="e.g., John, Coffee Breaks, Goals..."
                     value={newCounter.name}
-                    onChange={(e) => setNewCounter((prev) => ({ ...prev, name: e.target.value }))}
+                    onChange={(e) =>
+                      setNewCounter((prev) => ({
+                        ...prev,
+                        name: e.target.value,
+                      }))
+                    }
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    💡 Use the same name to combine with existing counters in the leaderboard
+                    💡 Use the same name to combine with existing counters in
+                    the leaderboard
                   </p>
                 </div>
                 <div>
@@ -477,7 +741,12 @@ export default function UniversalCounterApp() {
                     id="phrase"
                     placeholder="e.g., Says 'Actually...', Drinks coffee, Scores goal..."
                     value={newCounter.phrase}
-                    onChange={(e) => setNewCounter((prev) => ({ ...prev, phrase: e.target.value }))}
+                    onChange={(e) =>
+                      setNewCounter((prev) => ({
+                        ...prev,
+                        phrase: e.target.value,
+                      }))
+                    }
                   />
                 </div>
                 <div>
@@ -487,17 +756,23 @@ export default function UniversalCounterApp() {
                       <button
                         key={color}
                         className={`w-8 h-8 rounded-full border-2 ${
-                          newCounter.color === color ? "border-gray-800" : "border-gray-300"
+                          newCounter.color === color
+                            ? "border-gray-800"
+                            : "border-gray-300"
                         }`}
                         style={{ backgroundColor: color }}
-                        onClick={() => setNewCounter((prev) => ({ ...prev, color }))}
+                        onClick={() =>
+                          setNewCounter((prev) => ({ ...prev, color }))
+                        }
                         aria-label={`Select color ${color}`}
                       />
                     ))}
                   </div>
                 </div>
                 <div>
-                  <Label htmlFor="profile-picture">Profile Picture (Optional)</Label>
+                  <Label htmlFor="profile-picture">
+                    Profile Picture (Optional)
+                  </Label>
                   <div className="mt-2">
                     {newCounter.profilePicture ? (
                       <div className="flex items-center gap-3">
@@ -506,7 +781,12 @@ export default function UniversalCounterApp() {
                           alt="Profile preview"
                           className="w-12 h-12 rounded-full object-cover border-2 border-gray-200"
                         />
-                        <Button type="button" variant="outline" size="sm" onClick={() => removeProfilePicture(false)}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => removeProfilePicture(false)}
+                        >
                           Remove
                         </Button>
                       </div>
@@ -518,7 +798,12 @@ export default function UniversalCounterApp() {
                         >
                           <User className="w-6 h-6 text-gray-400" />
                         </div>
-                        <Button type="button" variant="outline" size="sm" onClick={() => fileInputRef.current?.click()}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => fileInputRef.current?.click()}
+                        >
                           <Upload className="w-4 h-4 mr-2" />
                           Upload Image
                         </Button>
@@ -552,8 +837,13 @@ export default function UniversalCounterApp() {
         {/* Counters Grid */}
         <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3 mb-8">
           {counters.map((counter) => {
-            const sameNameCounters = counters.filter((c) => c.name.toLowerCase() === counter.name.toLowerCase())
-            const totalForName = sameNameCounters.reduce((sum, c) => sum + c.count, 0)
+            const sameNameCounters = counters.filter(
+              (c) => c.name.toLowerCase() === counter.name.toLowerCase()
+            );
+            const totalForName = sameNameCounters.reduce(
+              (sum, c) => sum + c.count,
+              0
+            );
 
             return (
               <Card key={counter.id} className="relative">
@@ -568,9 +858,13 @@ export default function UniversalCounterApp() {
                         textSize="text-xs"
                       />
                       <div>
-                        <CardTitle className="text-lg">{counter.name}</CardTitle>
+                        <CardTitle className="text-lg">
+                          {counter.name}
+                        </CardTitle>
                         {sameNameCounters.length > 1 && (
-                          <p className="text-xs text-gray-500">Combined total: {totalForName}</p>
+                          <p className="text-xs text-gray-500">
+                            Combined total: {totalForName}
+                          </p>
                         )}
                       </div>
                     </div>
@@ -594,7 +888,9 @@ export default function UniversalCounterApp() {
                       </Button>
                     </div>
                   </div>
-                  <p className="text-sm text-gray-600 italic ml-13">"{counter.phrase}"</p>
+                  <p className="text-sm text-gray-600 italic ml-13">
+                    "{counter.phrase}"
+                  </p>
                 </CardHeader>
                 <CardContent>
                   <div className="flex items-center justify-between mb-4">
@@ -609,7 +905,10 @@ export default function UniversalCounterApp() {
                     </Button>
 
                     <div className="text-center">
-                      <div className="text-3xl font-bold" style={{ color: counter.color }}>
+                      <div
+                        className="text-3xl font-bold"
+                        style={{ color: counter.color }}
+                      >
                         {counter.count}
                       </div>
                       <div className="text-sm text-gray-500">count</div>
@@ -627,7 +926,7 @@ export default function UniversalCounterApp() {
                   </div>
                 </CardContent>
               </Card>
-            )
+            );
           })}
         </div>
 
@@ -652,10 +951,10 @@ export default function UniversalCounterApp() {
                             group.rank === 1
                               ? "bg-yellow-500 hover:bg-yellow-600"
                               : group.rank === 2
-                                ? "bg-gray-400 hover:bg-gray-500"
-                                : group.rank === 3
-                                  ? "bg-amber-600 hover:bg-amber-700"
-                                  : ""
+                              ? "bg-gray-400 hover:bg-gray-500"
+                              : group.rank === 3
+                              ? "bg-amber-600 hover:bg-amber-700"
+                              : ""
                           }
                         >
                           #{group.rank}
@@ -670,18 +969,27 @@ export default function UniversalCounterApp() {
                         <div>
                           <span className="font-medium">{group.name}</span>
                           {group.phrases.length > 1 && (
-                            <p className="text-xs text-gray-500">{group.phrases.length} different phrases tracked</p>
+                            <p className="text-xs text-gray-500">
+                              {group.phrases.length} different phrases tracked
+                            </p>
                           )}
                         </div>
                       </div>
-                      <span className="font-bold text-lg">{group.totalCount}</span>
+                      <span className="font-bold text-lg">
+                        {group.totalCount}
+                      </span>
                     </div>
                     <div className="relative ml-14">
-                      <Progress value={(group.totalCount / maxGroupedCount) * 100} className="h-4" />
+                      <Progress
+                        value={(group.totalCount / maxGroupedCount) * 100}
+                        className="h-4"
+                      />
                       <div
                         className="absolute top-0 left-0 h-4 rounded-full transition-all duration-500 ease-in-out"
                         style={{
-                          width: `${(group.totalCount / maxGroupedCount) * 100}%`,
+                          width: `${
+                            (group.totalCount / maxGroupedCount) * 100
+                          }%`,
                           backgroundColor: group.color,
                         }}
                       />
@@ -720,16 +1028,26 @@ export default function UniversalCounterApp() {
                   <Input
                     id="edit-name"
                     value={editingCounter.name}
-                    onChange={(e) => setEditingCounter((prev) => (prev ? { ...prev, name: e.target.value } : null))}
+                    onChange={(e) =>
+                      setEditingCounter((prev) =>
+                        prev ? { ...prev, name: e.target.value } : null
+                      )
+                    }
                   />
-                  <p className="text-xs text-gray-500 mt-1">💡 Changing the name will affect leaderboard grouping</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    💡 Changing the name will affect leaderboard grouping
+                  </p>
                 </div>
                 <div>
                   <Label htmlFor="edit-phrase">Phrase/Action to Track</Label>
                   <Input
                     id="edit-phrase"
                     value={editingCounter.phrase}
-                    onChange={(e) => setEditingCounter((prev) => (prev ? { ...prev, phrase: e.target.value } : null))}
+                    onChange={(e) =>
+                      setEditingCounter((prev) =>
+                        prev ? { ...prev, phrase: e.target.value } : null
+                      )
+                    }
                   />
                 </div>
                 <div>
@@ -739,26 +1057,41 @@ export default function UniversalCounterApp() {
                       <button
                         key={color}
                         className={`w-8 h-8 rounded-full border-2 ${
-                          editingCounter.color === color ? "border-gray-800" : "border-gray-300"
+                          editingCounter.color === color
+                            ? "border-gray-800"
+                            : "border-gray-300"
                         }`}
                         style={{ backgroundColor: color }}
-                        onClick={() => setEditingCounter((prev) => (prev ? { ...prev, color } : null))}
+                        onClick={() =>
+                          setEditingCounter((prev) =>
+                            prev ? { ...prev, color } : null
+                          )
+                        }
                         aria-label={`Select color ${color}`}
                       />
                     ))}
                   </div>
                 </div>
                 <div>
-                  <Label htmlFor="edit-profile-picture">Profile Picture (Optional)</Label>
+                  <Label htmlFor="edit-profile-picture">
+                    Profile Picture (Optional)
+                  </Label>
                   <div className="mt-2">
                     {editingCounter.profilePicture ? (
                       <div className="flex items-center gap-3">
                         <img
-                          src={editingCounter.profilePicture || "/placeholder.svg"}
+                          src={
+                            editingCounter.profilePicture || "/placeholder.svg"
+                          }
                           alt="Profile preview"
                           className="w-12 h-12 rounded-full object-cover border-2 border-gray-200"
                         />
-                        <Button type="button" variant="outline" size="sm" onClick={() => removeProfilePicture(true)}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => removeProfilePicture(true)}
+                        >
                           Remove
                         </Button>
                       </div>
@@ -766,7 +1099,9 @@ export default function UniversalCounterApp() {
                       <div className="flex items-center gap-3">
                         <div
                           className="w-12 h-12 rounded-full flex items-center justify-center border-2 border-dashed border-gray-300"
-                          style={{ backgroundColor: editingCounter.color + "20" }}
+                          style={{
+                            backgroundColor: editingCounter.color + "20",
+                          }}
                         >
                           <User className="w-6 h-6 text-gray-400" />
                         </div>
@@ -812,5 +1147,5 @@ export default function UniversalCounterApp() {
         )}
       </div>
     </div>
-  )
+  );
 }
