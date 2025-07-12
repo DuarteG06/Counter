@@ -1,54 +1,46 @@
-# .github/workflows/pages.yml
 name: Deploy to GitHub Pages
-
 on:
   push:
     branches: [main]
 
 permissions:
-  contents: write      # push to gh-pages
-  pages: write         # publish Pages
-  id-token: write      # OIDC for Pages deploy
+  contents: write
+  pages: write
+  id-token: write
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-
     steps:
-      - name: 📥 Check out source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 🟢 Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm           # <-- built-in cache
+          cache: npm
 
       - name: 🔧 Install & build
         env:
-          VITE_API_URL: ${{ secrets.API_URL }}
+          VITE_API_URL: ${{ secrets.API_URL }}         # keep if you still need them
           VITE_ANALYTICS_ID: ${{ secrets.ANALYTICS_ID }}
           CI: true
         run: |
           npm ci
-          npm run build        # MUST output to dist/
+          npm run build                                # now writes to out/
 
-      - name: 🔍 Smoke-test build artefacts
+      - name: 🔍 Sanity-check export
         run: |
-          if [ ! -d dist ] || [ -z "$(ls -A dist)" ]; then
-            echo "🔴 dist/ is missing or empty" >&2
+          if [ ! -d out ] || [ -z "$(ls -A out)" ]; then
+            echo "🔴 out/ is missing or empty" >&2
             exit 1
           fi
-          echo "✅ dist/ exists with files:"
-          ls -R dist | head -n 20
+          echo "✅ out/ exists with files:"
+          ls -R out | head -n 20
 
       - name: 🚀 Deploy to gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: dist          # match your Vite outDir
-          publish_branch: gh-pages   # default but explicit
-          force_orphan: true         # ignores .gitignore, starts clean tree
+          publish_dir: out          # <<< change here
+          publish_branch: gh-pages
+          force_orphan: true
