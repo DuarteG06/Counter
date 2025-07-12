@@ -1,34 +1,36 @@
-# .github/workflows/pages.yml
 name: Deploy to GitHub Pages
+
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+
 permissions:
-  contents: write        # allow pushing to gh-pages
-  pages: write           # allow GitHub Pages deployment
-  id-token: write
+  pages: write
+  id-token: write   # OIDC for deploy
+  contents: read    # checkout only
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
-      - name: Inject env and build
+      - name: Install & build
+        env:
+          VITE_API_URL: ${{ secrets.API_URL }}
+          VITE_ANALYTICS_ID: ${{ secrets.ANALYTICS_ID }}
+          CI: true
         run: |
-          # Create temp env file from secrets
-          echo "VITE_API_URL=${{ secrets.API_URL }}"        >> .env
-          echo "VITE_ANALYTICS_ID=${{ secrets.ANALYTICS_ID }}" >> .env
           npm ci
-          npm run build
-      - name: Deploy to gh-pages branch
-        uses: peaceiris/actions-gh-pages@v4
+          npm run build          # outputs to dist/
+
+      - uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./build    # or ./build for CRA
+          path: build
+
+      - uses: actions/deploy-pages@v4   # 🚀
