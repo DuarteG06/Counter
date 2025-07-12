@@ -152,40 +152,67 @@ export default function UniversalCounterApp() {
 
   // ---------- SUPABASE REALTIME ----------
   useEffect(() => {
-    if (!supabase) return;
-    supaChannelRef.current = supabase.channel("universal-counter-sync");
-    supaChannelRef.current
-      .on("broadcast", { event: "SYNC_STATE" }, (payload: any) => {
-        if (
-          payload?.sender !== instanceId.current &&
-          Array.isArray(payload?.counters)
-        ) {
-          setCounters(payload.counters);
-        }
-      })
-      .subscribe();
-    return () => supaChannelRef.current?.unsubscribe();
-  }, []);
+  if (!supabase) return;
+
+  // Step 1: Fetch initial counters from Supabase
+  const fetchInitialCounters = async () => {
+    const { data, error } = await supabase
+      .from("counter_state")
+      .select("*")
+      .order("id", { ascending: true }); // optional sort
+
+    if (error) {
+      console.error("Failed to fetch counters:", error);
+    } else if (Array.isArray(data)) {
+      setCounters(data);
+    }
+  };
+
+  fetchInitialCounters(); // fetch on mount
+
+  // Step 2: Set up Supabase real-time broadcast listener
+  supaChannelRef.current = supabase.channel("universal-counter-sync");
+
+  supaChannelRef.current
+    .on("broadcast", { event: "SYNC_STATE" }, (payload: any) => {
+      if (
+        payload?.sender !== instanceId.current &&
+        Array.isArray(payload?.counters)
+      ) {
+        setCounters(payload.counters);
+      }
+    })
+    .subscribe();
+
+  // Cleanup
+  return () => supaChannelRef.current?.unsubscribe();
+}, []);
+
 
   const resetAllCounters = () => {
     setCounters((prev) => prev.map((counter) => ({ ...counter, count: 0 })));
   };
 
   // ---------- PERSIST + PUBLISH ----------
-  const publish = (state: Counter[]) => {
-    // local
-    localStorage.setItem("universalCounters", JSON.stringify(state));
-    // broadcast‑channel
-    bcRef.current?.postMessage({ sender: instanceId.current, counters: state });
-    // supabase realtime broadcast
-    supaChannelRef.current?.send({
-      type: "broadcast",
-      event: "SYNC_STATE",
-      payload: { sender: instanceId.current, counters: state },
-    });
-    // snapshot in DB (upsert row id 1)
-    supabase?.from("counter_state").upsert({ id: 1, data: state });
-  };
+  const publish = async (state: Counter[]) => {
+  localStorage.setItem("universalCounters", JSON.stringify(state));
+  bcRef.current?.postMessage({ sender: instanceId.current, counters: state });
+  supaChannelRef.current?.send({
+    type: "broadcast",
+    event: "SYNC_STATE",
+    payload: { sender: instanceId.current, counters: state },
+  });
+
+  // upsert each counter (must have id as unique or primary key)
+  if(!supabase)
+    return;
+  const { error } = await supabase.from("counter_state").upsert(state, {
+    onConflict: "id", // assumes `id` is a unique or primary key
+  });
+
+  if (error) console.error("Upsert failed:", error);
+};
+
 
   // whenever counters change → publish
   useEffect(() => {
@@ -464,7 +491,7 @@ export default function UniversalCounterApp() {
               autoFocus
               type="password"
               value={passwordInput}
-              placeholder="skibidi"
+              placeholder="password"
               onChange={(e) => setPasswordInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && authenticate()}
             />
