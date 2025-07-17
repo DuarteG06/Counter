@@ -9,6 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Session } from "@supabase/supabase-js";
+
 import {
   Plus,
   Minus,
@@ -31,7 +33,7 @@ import {
 import { Label } from "@/components/ui/label";
 
 /** -----------------------------------------------------------
- *                     ✨  DATA TYPES
+ *                     ✨  DATA TYPES
  * ----------------------------------------------------------*/
 interface Counter {
   id: string;
@@ -53,13 +55,13 @@ interface RankedCounter extends GroupedCounter {
 }
 
 /** -----------------------------------------------------------
- *                     🔌  SUPABASE CLIENT
+ *                     🔌  SUPABASE CLIENT
  * ----------------------------------------------------------*/
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL as string;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string;
 if (!supabaseUrl || !supabaseAnonKey) {
   // eslint‑disable‑next‑line no‑console
-  console.warn("⛔️ Supabase env vars missing – realtime sync disabled.");
+  console.warn("⛔️ Supabase env vars missing - realtime sync disabled.");
 }
 const supabase: SupabaseClient | null =
   supabaseUrl && supabaseAnonKey
@@ -67,28 +69,21 @@ const supabase: SupabaseClient | null =
     : null;
 
 export default function UniversalCounterApp() {
-  /* ---------------------------------------------------------
-   * 🔐  SIMPLE PASSWORD AUTH – persistent per browser.
-   * --------------------------------------------------------*/
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(
-    () =>
-      typeof window !== "undefined" &&
-      localStorage.getItem("isAuthenticated") === "true"
-  );
-  const [passwordInput, setPasswordInput] = useState("");
-  const [authDialogOpen, setAuthDialogOpen] = useState(!isAuthenticated);
-  const authenticate = () => {
-    if (passwordInput.trim().toLowerCase() === "skibidi") {
-      setIsAuthenticated(true);
-      localStorage.setItem("isAuthenticated", "true");
-      setAuthDialogOpen(false);
-    } else {
-      alert("Wrong password – try again.");
-    }
-  };
+  const [session, setSession] = useState<Session | null>(null);
+
+  // gate everything behind a real Supabase session
+  useEffect(() => {
+    if (!supabase) return;
+
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_, s) => setSession(s));
+    return () => subscription.unsubscribe();
+  }, []);
 
   /* ---------------------------------------------------------
-   * 📡  REALTIME SYNC →  Supabase + BroadcastChannel + localStorage
+   * 📡  REALTIME SYNC →  Supabase + BroadcastChannel + localStorage
    * --------------------------------------------------------*/
   const bcRef = useRef<BroadcastChannel | null>(null);
   const supaChannelRef = useRef<any>(null);
@@ -97,21 +92,24 @@ export default function UniversalCounterApp() {
   // ---------- local state ----------
   const [counters, setCounters] = useState<Counter[]>([]);
 
-  // ---------- INITIAL LOAD ----------
+  // ---------- INITIAL LOAD ----------
   useEffect(() => {
     const loadInitial = async () => {
       // Prefer server snapshot → fallback to localStorage → fallback to seed
-      if (supabase) {
-        const { data } = await supabase
+      if (supabase && session) {
+        const { data, error } = await supabase
           .from("counter_state")
-          .select("data")
-          .eq("id", 1)
-          .single();
-        if (data?.data) {
-          setCounters(data.data as Counter[]);
+          .select("*")
+          .order("created_at", { ascending: true });
+
+        if (error) {
+          console.error("Error loading counters:", error);
+        } else if (data) {
+          setCounters(data as Counter[]);
           return;
         }
       }
+
       const local = localStorage.getItem("universalCounters");
       if (local) {
         setCounters(JSON.parse(local));
@@ -136,9 +134,9 @@ export default function UniversalCounterApp() {
       ]);
     };
     loadInitial();
-  }, []);
+  }, [session]);
 
-  // ---------- BROADCAST CHANNEL ----------
+  // ---------- BROADCAST CHANNEL ----------
   useEffect(() => {
     bcRef.current = new BroadcastChannel("universal-counter-sync");
     bcRef.current.onmessage = (e) => {
@@ -150,69 +148,70 @@ export default function UniversalCounterApp() {
     return () => bcRef.current?.close();
   }, []);
 
-  // ---------- SUPABASE REALTIME ----------
+  // ---------- SUPABASE REALTIME ----------
   useEffect(() => {
-  if (!supabase) return;
+    if (!supabase || !session) return;
 
-  // Step 1: Fetch initial counters from Supabase
-  const fetchInitialCounters = async () => {
-    const { data, error } = await supabase
-      .from("counter_state")
-      .select("*")
-      .order("id", { ascending: true }); // optional sort
+    // Set up Supabase real-time broadcast listener
+    supaChannelRef.current = supabase.channel("universal-counter-sync");
 
-    if (error) {
-      console.error("Failed to fetch counters:", error);
-    } else if (Array.isArray(data)) {
-      setCounters(data);
-    }
-  };
+    supaChannelRef.current
+      .on("broadcast", { event: "SYNC_STATE" }, (payload: any) => {
+        if (
+          payload?.sender !== instanceId.current &&
+          Array.isArray(payload?.counters)
+        ) {
+          setCounters(payload.counters);
+        }
+      })
+      .subscribe();
 
-  fetchInitialCounters(); // fetch on mount
-
-  // Step 2: Set up Supabase real-time broadcast listener
-  supaChannelRef.current = supabase.channel("universal-counter-sync");
-
-  supaChannelRef.current
-    .on("broadcast", { event: "SYNC_STATE" }, (payload: any) => {
-      if (
-        payload?.sender !== instanceId.current &&
-        Array.isArray(payload?.counters)
-      ) {
-        setCounters(payload.counters);
-      }
-    })
-    .subscribe();
-
-  // Cleanup
-  return () => supaChannelRef.current?.unsubscribe();
-}, []);
-
+    // Cleanup
+    return () => supaChannelRef.current?.unsubscribe();
+  }, [session]);
 
   const resetAllCounters = () => {
     setCounters((prev) => prev.map((counter) => ({ ...counter, count: 0 })));
   };
 
-  // ---------- PERSIST + PUBLISH ----------
+  // ---------- PERSIST + PUBLISH ----------
   const publish = async (state: Counter[]) => {
-  localStorage.setItem("universalCounters", JSON.stringify(state));
-  bcRef.current?.postMessage({ sender: instanceId.current, counters: state });
-  supaChannelRef.current?.send({
-    type: "broadcast",
-    event: "SYNC_STATE",
-    payload: { sender: instanceId.current, counters: state },
-  });
+    localStorage.setItem("universalCounters", JSON.stringify(state));
+    bcRef.current?.postMessage({ sender: instanceId.current, counters: state });
+    supaChannelRef.current?.send({
+      type: "broadcast",
+      event: "SYNC_STATE",
+      payload: { sender: instanceId.current, counters: state },
+    });
 
-  // upsert each counter (must have id as unique or primary key)
-  if(!supabase)
-    return;
-  const { error } = await supabase.from("counter_state").upsert(state, {
-    onConflict: "id", // assumes `id` is a unique or primary key
-  });
+    // Only sync to Supabase if we have a session
+    if (!supabase || !session) return;
 
-  if (error) console.error("Upsert failed:", error);
-};
+    try {
+      // Upsert each counter individually
+      for (const counter of state) {
+        const { error } = await supabase.from("counter_state").upsert(
+          {
+            id: counter.id,
+            name: counter.name,
+            phrase: counter.phrase,
+            count: counter.count,
+            color: counter.color,
+            profilePicture: counter.profilePicture,
+          },
+          {
+            onConflict: "id",
+          }
+        );
 
+        if (error) {
+          console.error("Error upserting counter:", counter.id, error);
+        }
+      }
+    } catch (error) {
+      console.error("Error in publish function:", error);
+    }
+  };
 
   // whenever counters change → publish
   useEffect(() => {
@@ -220,20 +219,19 @@ export default function UniversalCounterApp() {
   }, [counters]);
 
   /* ---------------------------------------------------------
-   * 👍  GUARD helper to block edits unless authenticated
+   * 👍  GUARD helper to block edits unless authenticated
    * --------------------------------------------------------*/
   const guard =
     <T extends any[]>(fn: (...args: T) => void) =>
     (...args: T) => {
-      if (!isAuthenticated) {
-        setAuthDialogOpen(true);
+      if (!session) {
         return;
       }
       fn(...args);
     };
 
   /* ---------------------------------------------------------
-   *  CRUD ACTIONS (wrapped with guard)
+   *  CRUD ACTIONS (wrapped with guard)
    * --------------------------------------------------------*/
   const increaseCounter = guard((id: string) => {
     setCounters((prev) =>
@@ -247,8 +245,17 @@ export default function UniversalCounterApp() {
       )
     );
   });
-  const deleteCounter = guard((id: string) => {
+  const deleteCounter = guard(async (id: string) => {
     setCounters((prev) => prev.filter((c) => c.id !== id));
+
+    // Also delete from Supabase
+    if (supabase && session) {
+      const { error } = await supabase.from("counters").delete().eq("id", id);
+
+      if (error) {
+        console.error("Error deleting counter from Supabase:", error);
+      }
+    }
   });
 
   const [newCounter, setNewCounter] = useState({
@@ -478,29 +485,6 @@ export default function UniversalCounterApp() {
    * --------------------------------------------------------*/
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
-      {/* 🔐  Password modal  */}
-      <Dialog open={authDialogOpen} onOpenChange={() => {}}>
-        <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Lock className="w-4 h-4" /> Enter secret word
-            </DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4">
-            <Input
-              autoFocus
-              type="password"
-              value={passwordInput}
-              placeholder="password"
-              onChange={(e) => setPasswordInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && authenticate()}
-            />
-            <Button className="w-full" onClick={authenticate}>
-              Unlock
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
       <div className="max-w-4xl mx-auto">
         <header className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gray-800 mb-2">
@@ -512,6 +496,14 @@ export default function UniversalCounterApp() {
           <p className="text-sm text-gray-500 mt-2">
             💡 Tip: Counters with the same name are combined in the leaderboard
           </p>
+          {!session && (
+            <div className="mt-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+              <div className="flex items-center justify-center gap-2 text-yellow-700">
+                <Lock className="w-5 h-5" />
+                <p className="font-medium">Please sign in to make changes</p>
+              </div>
+            </div>
+          )}
         </header>
 
         {/* Winner Announcement */}
@@ -734,7 +726,10 @@ export default function UniversalCounterApp() {
         <div className="flex justify-center gap-4 mb-8">
           <Dialog open={isAddDialogOpen} onOpenChange={setIsAddDialogOpen}>
             <DialogTrigger asChild>
-              <Button className="bg-green-600 hover:bg-green-700">
+              <Button
+                className="bg-green-600 hover:bg-green-700"
+                disabled={!session}
+              >
                 <Plus className="w-4 h-4 mr-2" />
                 Add New Counter
               </Button>
